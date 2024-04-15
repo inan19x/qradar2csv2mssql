@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # @author Futuhal Arifin Annasri - IBM Security
-# This script will prepares table in MSSQL from a database called QRadarLogs to another table called Tableau_XXXX for Tableau data visualization.
+# This script will prepares table in MSSQL from a database called QRadarLogs to another table for Daily, Weekly, Monthly aggregated data.
 
 import sys
 import os
@@ -14,81 +14,78 @@ from datetime import datetime, timedelta
 
 
 def main():
-	connection = get_mssql_connection()
-	qradar_raw_log_db = 'QRadarLogs'
-	date = datetime.now()
+    connection = get_mssql_connection()
+    qradar_raw_log_db = 'QRadarLogs'
+    date = datetime.now()
 
-	build_daily_report(connection, date)
-	build_weekly_report(connection, date)
-	build_monthly_report(connection, date)
+    build_daily_report(connection, date)
+    build_weekly_report(connection, date)
+    build_monthly_report(connection, date)
 
 
 def build_report(connection, list_date, table_name_prefix, week_setting='automatic'):
-	cursor = connection.cursor()
-	query_expression = "SELECT name FROM master.dbo.sysdatabases"
-	cursor.execute(query_expression)
-	db_names = cursor.fetchall()
+    cursor = connection.cursor()
+    query_expression = "SELECT name FROM master.dbo.sysdatabases"
+    cursor.execute(query_expression)
+    db_names = cursor.fetchall()
 	
-	tables = []
-	for name in db_names:
-		if 'T_' in name[0][0:2]:
-			tables.append(name[0])
-
-	query_expression = """
+    tables = []
+    for name in db_names:
+        if 'T_' in name[0][0:2]:
+            tables.append(name[0])
+ 
+    query_expression = """
 						USE QRadarLogs
 						"""
-	cursor.execute(query_expression)
+    cursor.execute(query_expression)
 
-	query_expression = """
+    query_expression = """
 						SELECT TABLE_NAME
 						FROM INFORMATION_SCHEMA.TABLES
 						ORDER BY TABLE_NAME 
 						"""
-	cursor.execute(query_expression)
-	db_names = cursor.fetchall()
+    cursor.execute(query_expression)
+    db_names = cursor.fetchall()
     
-	table_raw = []
-	week_dict = get_week_number_by_order(list_date)
+    table_raw = []
+    week_dict = get_week_number_by_order(list_date)
+    
+    for name in db_names:
+        table_raw.append(name[0])
+    
+    for table in tables:
+        table_for_union = []
+        week_name = ''
+        for date in list_date:
+            if ('MONTHLY' in table_name_prefix):
+                if week_setting == 'automatic':
+                    week_name = ", '{0}' as 'Week'".format(get_week_number(dt.date(int(date[0:4]), int(date[4:6]), int(date[6:8]))))
+                else:
+                    week_name = ", '{0}' as 'Week'".format(week_dict[date])
+            
+            table_for_union.append('SELECT * {0} FROM [QRadarLogs].[dbo].[{1}]'.format(week_name, table + '_' + date))
+            
+        if not table_for_union:
+            continue
 
-	for name in db_names:
-		table_raw.append(name[0])
+        query_expression = "USE {0}".format(table)
+        cursor.execute(query_expression)
+        
+        query_expression = "if exists (select * from INFORMATION_SCHEMA.TABLES where TABLE_NAME = '{0}' AND TABLE_SCHEMA = 'dbo') drop table dbo.{0};".format(table_name_prefix + table + '_' + list_date[0])
+        cursor.execute(query_expression)
+        connection.commit()
 
-	for table in tables:
-
-		table_for_union = []
-		week_name = ''
-
-		for date in list_date:
-			if ('MONTHLY' in table_name_prefix):
-				if week_setting == 'automatic':
-					week_name = ", '{0}' as 'Week'".format(get_week_number(dt.date(int(date[0:4]), int(date[4:6]), int(date[6:8]))))
-				else:
-					week_name = ", '{0}' as 'Week'".format(week_dict[date])
-
-			if table + '_' + date in table_raw:
-				table_for_union.append('SELECT * {0} FROM [QRadarLogs].[dbo].[{1}]'.format(week_name, table + '_' + date))
-
-		if not table_for_union:
-			continue
-
-		query_expression = "USE {0}".format(table)
-		cursor.execute(query_expression)
-
-		query_expression = "DROP TABLE IF EXISTS {0}".format(table_name_prefix + table + '_' + list_date[0])
-		cursor.execute(query_expression)
-		connection.commit()
-
-		query_expression = """
+        query_expression = """
 			SELECT *
 			INTO  [{0}].[dbo].[{1}]
 			FROM (
-				{2}
-			) as tmp
-		""".format(table, table_name_prefix + table + '_' + list_date[0], ' UNION ALL '.join(table_for_union))
-		cursor.execute(query_expression)
-		cursor.commit()
+		        {2}
+		    ) as tmp
+        """.format(table, table_name_prefix + table + '_' + list_date[0], ' UNION ALL '.join(table_for_union))            
+        cursor.execute(query_expression)
+        cursor.commit()
 
-		print('Success created Table ' + table_name_prefix + table + '_' + list_date[0])
+        print('Success created Table ' + table_name_prefix + table + '_' + list_date[0])
 
 
 def get_week_number_by_order(list_date):
@@ -122,16 +119,15 @@ def get_week_number_by_order(list_date):
 
 
 def build_daily_report(connection, date):
-	print('Creating Daily Report')
-	list_date = []
+    print('Creating Daily Report')
+    list_date = []
+    # in daily report, we take report from past 3 days
+    for i in range(1,4):
+        list_date.append(datetime.strftime(date - timedelta(i), '%Y%m%d'))
 
-	# in daily report, we take report from past 3 days
-	for i in range(1,4):
-		list_date.append(datetime.strftime(date - timedelta(i), '%Y%m%d'))
+    table_name_prefix = 'DAILY_'
 
-	table_name_prefix = 'DAILY_'
-
-	build_report(connection, list_date, table_name_prefix)
+    build_report(connection, list_date, table_name_prefix)
 
 
 def build_weekly_report(connection, date):
@@ -251,9 +247,10 @@ def get_the_first_day_of_month(date):
 
 
 def get_mssql_connection():
-	connection = pyodbc.connect('driver={ODBC Driver 17 for SQL Server};server=DBHOST;uid=DBUSER;pwd=DBPASSW;ColumnEncryption=Enabled;') #Hardcoded
+    #Hardcoded
+    connection = pyodbc.connect("DRIVER=FreeTDS;SERVER=<DB-SERVER-HERE>;PORT=1433;DATABASE=<DB-NAME-HERE>;UID=<DB-USER-HERE>;PWD=<DB-PASSW-HERE>;TDS_Version=7.3;")
 	
-	return connection
+    return connection
 
 
 if __name__ == "__main__":

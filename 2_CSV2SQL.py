@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # @author Futuhal Arifin Annasri - IBM Security
-# This script will process CSV data from file located at 'csv4tableau' folder to MSSQL database.
+# This script will process CSV data from file located at 'csvdata' folder to MSSQL database.
 # The raw log will be stored at DB named QRadarLogs
 
 import sys
@@ -12,53 +12,40 @@ import time
 from datetime import datetime
 
 def main():
-	connection = get_mssql_connection()
+    connection = get_mssql_connection()
 
-	path = os.path.realpath('csv4tableau')
+    path = os.path.realpath('csvdata')
 
-	log_files = []
-	log_report = []
+    log_files = []
+    log_report = []
 
-	for r, d, f in os.walk(path):
-		for file in f:
-			if '.csv' in file:
-				log_files.append(file)
+    for r, d, f in os.walk(path):
+        for file in f:
+            if '.csv' in file:
+                log_files.append(file)
 
-	for file in log_files:
-		table_metadata = examine_csv_file(path, file)
-		if table_metadata['error'] == 'No':
-			create_mssql_table(connection, table_metadata)
-			insert_table(connection, table_metadata)
+    for file in log_files:
+        table_metadata = examine_csv_file(path, file)
+        if table_metadata['error'] == 'No':
+            create_mssql_table(connection, table_metadata)
+            insert_table(connection, table_metadata)
 
-			if table_metadata['application']:
-				join_table(connection, table_metadata)
+            log_report.append("{0} - Success importing log {1} to Database.".format(datetime.strftime(datetime.now(), 
+                '%Y-%m-%d %H:%M:%S'), file))
+        else:
+            print('Skip importing log from {}'.format(file))
+            log_report.append("{0} - Unable importing log {1}. Maybe the file was empty or corrupt.".format(datetime.strftime(datetime.now(), 
+                '%Y-%m-%d %H:%M:%S'), file))
 
-			log_report.append("{0} - Success importing log {1} to Database.".format(datetime.strftime(datetime.now(), 
-				'%Y-%m-%d %H:%M:%S'), file))
-		else:
-			print('Skip importing log from {}'.format(file))
-			log_report.append("{0} - Unable importing log {1}. Maybe the file was empty or corrupt.".format(datetime.strftime(datetime.now(), 
-				'%Y-%m-%d %H:%M:%S'), file))
-
-		os.remove(os.path.join(path, file))
-
-	record_activity_log(log_report)
-
-
-def record_activity_log(record):
-	file = open('CSV2SQL.log', 'a+')
-
-	for activity in record:
-		file.write(activity+'\n')
-	file.close()
+        os.remove(os.path.join(path, file))
 
 
 def create_mssql_table(connection, table_metadata):
-	print('Process Table {}'.format(table_metadata['name']))
+	print('Create New Table {}'.format(table_metadata['name']))
 	cursor = connection.cursor()
 
-	# Delete table if exist (will be replaced)
-	query_expression = "DROP TABLE IF EXISTS {0}".format(table_metadata['name'])
+	# Delete table if exist 
+	query_expression = "if exists (select * from INFORMATION_SCHEMA.TABLES where TABLE_NAME = '{0}' AND TABLE_SCHEMA = 'dbo') drop table dbo.{0};".format(table_metadata['name'])
 	cursor.execute(query_expression)
 	connection.commit()
 
@@ -73,7 +60,6 @@ def create_mssql_table(connection, table_metadata):
 		""".format(table_metadata['name'], ', '.join(column_detail))
 
 	cursor.setinputsizes([(pyodbc.SQL_WVARCHAR, 0, 0)])	
-	print(query_expression)
 	
 	retry_flag = True
 	retry_count = 0
@@ -89,8 +75,9 @@ def insert_table(connection, table_metadata):
 	query_expression = "TRUNCATE TABLE {}".format(table_metadata['name'])
 	cursor.execute(query_expression)
 	connection.commit()
-
-	cursor.fast_executemany = True  # new in pyodbc 4.0.19
+    
+    ## Uncomment for fast parallel query, new in pyodbc 4.0.19
+	#cursor.fast_executemany = True
 
 	query_expression = """INSERT INTO {0} ({1}) VALUES ({2})""".format(table_metadata['name'],
 		', '.join([f'"{i}"' for i in table_metadata['header']]).replace('"None"', 'NULL'),
@@ -104,38 +91,35 @@ def insert_table(connection, table_metadata):
 
 
 def join_table(connection, table_metadata):
-	cursor = connection.cursor()
+    cursor = connection.cursor()
 
-	if 'Source IP' in table_metadata['header']:
-		join_column = 'Source IP'
-	else:
-		join_column = 'Destination IP'
+    query_expression = "DROP TABLE IF EXISTS #TEMP"
+    cursor.execute(query_expression)
+    connection.commit()
 
-	query_expression = "DROP TABLE IF EXISTS #TEMP"
-	cursor.execute(query_expression)
-	connection.commit()
+    #Delete table if exist
+    query_expression = "if exists (select * from INFORMATION_SCHEMA.TABLES where TABLE_NAME = '{0}' AND TABLE_SCHEMA = 'dbo') drop table dbo.{0};".format(table_metadata['name'])
+    cursor.execute(query_expression)
+    connection.commit()
 
-	query_expression = "DROP TABLE IF EXISTS {0}".format(table_metadata['name'])
-	cursor.execute(query_expression)
-	connection.commit()
+    query_expression = """
+        SELECT *
+        INTO [QRadarLogs].[dbo].{0}
+        FROM #TEMP
+        """.format(table_metadata['name'])
+    cursor.execute(query_expression)
+    connection.commit()	
 
-	query_expression = """
-		SELECT *
-		INTO [QRadarLogs].[dbo].{0}
-		FROM #TEMP
-		""".format(table_metadata['name'])
-	cursor.execute(query_expression)
-	connection.commit()	
-
-	query_expression = "DROP TABLE IF EXISTS #TEMP"
-	cursor.execute(query_expression)
-	connection.commit()
+    query_expression = "DROP TABLE IF EXISTS #TEMP"
+    cursor.execute(query_expression)
+    connection.commit()
 
 
 def get_mssql_connection():
-	connection = pyodbc.connect('driver={ODBC Driver 17 for SQL Server};server=DBHOST;database=DBNAME;uid=DBUSER;pwd=DBPASSW;ColumnEncryption=Enabled;') #Hardcoded
+    #Hardcoded
+    connection = pyodbc.connect("DRIVER=FreeTDS;SERVER=<DB-SVR-HERE>;PORT=1433;DATABASE=<DB-NAME-HERE>;UID=<DB-USER-HERE>;PWD=<DB-PASSW-HERE>;TDS_Version=7.3;")
 
-	return connection
+    return connection
 
 
 def examine_csv_file(path, filename): 
@@ -158,10 +142,6 @@ def examine_csv_file(path, filename):
 			table_metadata['data_type']	= lookup_the_data_type(table_metadata)
 			table_metadata['name'] = filename.replace('.csv', '')
 			table_metadata['error'] = 'No'
-			table_metadata['application'] = False
-
-			if 'Source IP' in table_metadata['header'] or 'Destination IP' in table_metadata['header']:
-				table_metadata['application'] = True 
 
 	except Exception as e:
 		print('Reading file error or maybe log is empty. skip...')
